@@ -31,14 +31,36 @@
 
 import os
 import operator
+import typing
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Annotated, List, Dict
-from typing_extensions import TypedDict
+
+try:
+    from typing_extensions import TypedDict  # type: ignore
+except ImportError:
+    TypedDict = typing.TypedDict  # type: ignore
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+import dotenv # type: ignore
 
-from langchain_core.messages import HumanMessage
+import pydantic # type: ignore
+from pydantic import BaseModel, Field  # type: ignore
+
+class QualityScore(BaseModel):
+    """Evaluation of research quality."""
+    score: int = Field(ge=1, le=10)
+    reasoning: str = Field(description="One-sentence justification")
+
+
+
+
+try:
+    from langchain_core.messages import HumanMessage  # type: ignore
+except ImportError:  # pragma: no cover
+    from langchain.schema import HumanMessage  # type: ignore
+
+     
 
 # TODO STEP 0 — import the graph building blocks from langgraph.
 # You need: StateGraph, START, END from langgraph.graph
@@ -47,7 +69,62 @@ from langchain_core.messages import HumanMessage
 # from langgraph.graph import ...
 # from langgraph.checkpoint.memory import ...
 
+from langgraph.graph import StateGraph, START, END  # type: ignore
+from langgraph.checkpoint.memory import InMemorySaver  # type: ignore
+from langchain_core.vectorstores import InMemoryVectorStore  # type: ignore
+
+class DeterministicFakeEmbedding:
+    def __init__(self, size: int = 3) -> None:
+        self.size = size
+
+    def _vectorize(self, text: str):
+        values = [((ord(char) * 13 + idx) % 100) / 100.0 for idx, char in enumerate(text[: self.size])]
+        return values + [0.0] * max(0, self.size - len(values))
+
+    def embed_documents(self, texts):
+        return [self._vectorize(text) for text in texts]
+
+    def embed_query(self, text):
+        return self._vectorize(text)
+
+class FakeInMemoryVectorStore:
+    def __init__(self, embedding):
+        self.embedding = embedding
+        self.docs = []
+
+    def add_texts(self, texts, **kwargs):
+        docs = []
+        vectors = self.embedding.embed_documents(texts)
+        for text, vector in zip(texts, vectors):
+            doc = SimpleNamespace(page_content=text, metadata={}, vector=vector)
+            docs.append(doc)
+        self.docs.extend(docs)
+        return docs
+
+    def similarity_search(self, query, k=4, **kwargs):
+        query_vector = self.embedding.embed_query(query)
+        scored = []
+        for doc in self.docs:
+            score = self._cosine_similarity(query_vector, doc.vector)
+            scored.append((doc, score))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return [doc for doc, _ in scored[:k]]
+
+    def _cosine_similarity(self, a, b):
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(y * y for y in b) ** 0.5
+        return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
 load_dotenv()
+
+USE_FAKE = os.getenv("USE_FAKE", "0") == "1"
+if not USE_FAKE:
+    missing_openai = not (os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_ADMIN_KEY") or os.getenv("OPENAI_WORKLOAD_IDENTITY"))
+    missing_tavily = not os.getenv("TAVILY_API_KEY")
+    if missing_openai or missing_tavily:
+        print("WARNING: Missing OpenAI/Tavily credentials; switching to offline fake mode.")
+        USE_FAKE = True
 
 
 # ============================================================
@@ -67,10 +144,31 @@ load_dotenv()
 # ASK YOURSELF: what happens to a plain (non-reducer) key when two
 # nodes write it? What happens with operator.add?
 
-class AgentState(TypedDict):
+from typing import List, Dict, Annotated
+import operator
+
+class ResearchState(typing.TypedDict):
     topic: str
-    # TODO: add the remaining 6 keys (one uses Annotated + operator.add)
-    pass
+    search_query: str
+    collected_data: typing.List[typing.Dict]
+    analyzed_data: typing.List[typing.Dict]
+    quality_score: int
+    iteration_count: int
+    final_report: str
+    execution_logs: typing.Annotated[typing.List[str], operator.add]
+
+
+
+
+class AgentState(typing.TypedDict):
+    topic: str
+    search_query: str
+    collected_data: typing.List[typing.Dict]
+    analyzed_data: typing.List[typing.Dict]
+    quality_score: int
+    iteration_count: int
+    final_report: str
+    execution_logs: typing.Annotated[typing.List[str], operator.add]
 
 
 # ============================================================
@@ -132,27 +230,118 @@ class AgentState(TypedDict):
 # NOTE: TavilySearch.invoke({"query": q}) returns a DICT — the
 # actual sources are under the "results" key. print() it once to see.
 
-# TODO: your code here
+# TODO: your code here 
+
+
+
+if USE_FAKE:
+    # ---------- deterministic fakes: run the graph offline ----------
+
+    class FakeLLM:
+        """Just enough of the ChatModel surface for this lab."""
+
+        def invoke(self, messages):
+            class _Resp:
+                content = (
+                    "Key findings: multi-agent orchestration, state-graph "
+                    "workflows, and guardrails dominate enterprise agentic "
+                    "AI adoption in 2026."
+                )
+            return _Resp()
+
+    class FakeEvaluator:
+        """Scores low on the first pass so the retry loop fires."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return QualityScore(score=5, reasoning="Only one shallow pass over the sources.")
+            return QualityScore(score=8, reasoning="Second pass added breadth and depth.")
+
+    class FakeSearch:
+        def invoke(self, payload):
+            q = payload["query"]
+            return {
+                "results": [
+                    {
+                        "title": f"Fake source A for: {q}",
+                        "url": "https://example.com/a",
+                        "content": f"Deterministic content about {q} — trends, tooling, adoption.",
+                    },
+                    {
+                        "title": f"Fake source B for: {q}",
+                        "url": "https://example.com/b",
+                        "content": f"Deterministic content about {q} — risks, governance, ROI.",
+                    },
+                ]
+            }
+
+    llm = FakeLLM()
+    evaluator = FakeEvaluator()
+    search_tool = FakeSearch()
+    embeddings = DeterministicFakeEmbedding(size=256)
+    vector_store = FakeInMemoryVectorStore(embeddings)
+
+else:
+    # ---------- real providers ----------
+    import importlib
+
+    ChatOpenAI = None
+    for module_name in ["langchain.chat_models", "langchain_openai"]:
+        try:
+            module = importlib.import_module(module_name)
+            ChatOpenAI = getattr(module, "ChatOpenAI")
+            break
+        except Exception:
+            continue
+    if ChatOpenAI is None:
+        raise ImportError(
+            "Could not import ChatOpenAI from langchain.chat_models or langchain_openai"
+        )
+
+    try:
+        from langchain_tavily import TavilySearch  # type: ignore
+    except ImportError:
+        TavilySearch = None  # type: ignore
+
+    # OpenRouter is OpenAI-compatible: same ChatOpenAI class, different
+    # base_url + model name. OPENAI_API_KEY in .env must be your
+    # sk-or-... key. The ":free" suffix is REQUIRED to avoid billing.
+    llm = ChatOpenAI(
+        model="nvidia/nemotron-3-super-120b-a12b:free",
+        temperature=0,
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    # STEP 3 — the structured evaluator. Returns a QualityScore OBJECT,
+    # not a string: result.score is already a validated int in [1, 10].
+    evaluator = llm.with_structured_output(QualityScore)
+
+    if TavilySearch is None:
+        raise ImportError(
+            "langchain_tavily is not installed; install it or set USE_FAKE=1 to run offline."
+        )
+    search_tool = TavilySearch(max_results=5)  # needs TAVILY_API_KEY
+
+    # OpenRouter has no embeddings endpoint → local HF embeddings if
+    # installed (uv sync --group embeddings), else deterministic fakes.
+    # Embeddings only power the RAG bonus, not the core graph.
+    try:
+        from langchain.embeddings import HuggingFaceEmbeddings  # type: ignore
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    except Exception:
+        embeddings = DeterministicFakeEmbedding(size=256)
+
+    vector_store = InMemoryVectorStore(embeddings)
+
+
 
 
 # ============================================================
-# STEP 3 — STRUCTURED OUTPUT for the quality score
-# ============================================================
-# Never parse int(response.content) out of free text. Define a
-# Pydantic schema and use llm.with_structured_output(...) so the
-# model is FORCED to return valid data.
-#
-# WHERE TO LOOK: https://docs.langchain.com/oss/python/langchain/structured-output
-# ASK YOURSELF: what does with_structured_output return — a string,
-# a dict, or a QualityScore object?
-
-class QualityScore(BaseModel):
-    """Evaluation of research quality."""
-    score: int = Field(ge=1, le=10)
-    reasoning: str = Field(description="One-sentence justification")
-
-# TODO: evaluator = llm.with_structured_output(QualityScore)
-
+# STEP 4 — NODES
 
 # ============================================================
 # STEP 4 — NODES
@@ -164,47 +353,148 @@ class QualityScore(BaseModel):
 # WHERE TO LOOK: Use Graph API docs → "Define and update state".
 #   https://docs.langchain.com/oss/python/langgraph/use-graph-api
 
+
+
+
+#                                  STEP 4 — NODES
+
 def collect_node(state: AgentState):
-    """Search the web. On retries, CHANGE the query!"""
-    # TODO:
-    # 1. iteration = state["iteration_count"] + 1
-    # 2. Build a query that DIFFERS per iteration (why? see Step 5)
-    # 3. results = search_tool.invoke({"query": query})["results"]
-    # 4. return {"search_query": ..., "collected_data": ...,
-    #            "iteration_count": ..., "execution_logs": [...]}
-    pass
+    """Search the web. On retries, CHANGE the query — a loop that
+    repeats the identical action can never produce a different result."""
+    iteration = state["iteration_count"] + 1
+
+    # A different angle per iteration (rule (a) of loop termination):
+    angles = {
+        1: f"{state['topic']} overview 2026",
+        2: f"{state['topic']} case studies implementation challenges",
+        3: f"{state['topic']} ROI metrics production deployments",
+    }
+    query = angles.get(iteration, f"{state['topic']} latest developments")
+
+    results = search_tool.invoke({"query": query})["results"]
+
+    sources = [
+        {
+            "title": r.get("title", ""),
+            "url": r.get("url", ""),
+            "content": r.get("content", ""),
+        }
+        for r in results
+    ]
+
+    return {
+        "search_query": query,
+        "collected_data": sources,
+        "iteration_count": iteration,
+        "execution_logs": [
+            f"[{datetime.now():%H:%M:%S}] collect (iter {iteration}): "
+            f"'{query}' → {len(sources)} sources"
+        ],
+    }
 
 
 def store_memory_node(state: AgentState):
-    """Save source contents into the vector store."""
-    # TODO: vector_store.add_texts([...contents...])
-    pass
+    """Save source contents into the vector store (long-term memory)."""
+    texts = [s["content"] for s in state["collected_data"] if s["content"]]
+    if texts:
+        vector_store.add_texts(texts)
+    return {
+        "execution_logs": [
+            f"[{datetime.now():%H:%M:%S}] store_memory: {len(texts)} chunks embedded"
+        ]
+    }
 
 
 def analyze_node(state: AgentState):
-    """LLM-analyze each source. Bonus: retrieve related past
-    research with vector_store.similarity_search(content, k=2)
-    and include it in the prompt — that's what makes this RAG."""
-    # TODO
-    pass
+    """LLM-analyze each source, enriched with related past research
+    retrieved from the vector store — that retrieval step is the RAG."""
+    analyzed = []
+    for source in state["collected_data"]:
+        related = vector_store.similarity_search(source["content"], k=2)
+        related_context = "\n".join(d.page_content[:200] for d in related)
+
+        prompt = (
+            f"Topic: {state['topic']}\n\n"
+            f"Source: {source['title']}\n{source['content']}\n\n"
+            f"Related prior research:\n{related_context}\n\n"
+            "Extract the 2-3 most important insights as concise bullet points."
+        )
+        response = llm.invoke([HumanMessage(content=prompt)])
+        analyzed.append(
+            {
+                "title": source["title"],
+                "url": source["url"],
+                "insights": response.content,
+            }
+        )
+
+    return {
+        "analyzed_data": analyzed,
+        "execution_logs": [
+            f"[{datetime.now():%H:%M:%S}] analyze: {len(analyzed)} sources analyzed"
+        ],
+    }
 
 
 def evaluate_node(state: AgentState):
-    """Score the research with the STRUCTURED evaluator (Step 3)."""
-    # TODO: return {"quality_score": result.score, "execution_logs": [...]}
-    pass
+    """Score the research with the STRUCTURED evaluator. result is a
+    QualityScore object — no fragile int() parsing of free text."""
+    summary = "\n".join(a["insights"] for a in state["analyzed_data"])
+    result = evaluator.invoke(
+        [
+            HumanMessage(
+                content=(
+                    f"Rate this research on '{state['topic']}' from 1-10 for "
+                    f"depth, breadth, and usefulness to an enterprise reader.\n\n"
+                    f"{summary}"
+                )
+            )
+        ]
+    )
+    return {
+        "quality_score": result.score,
+        "execution_logs": [
+            f"[{datetime.now():%H:%M:%S}] evaluate: score={result.score} "
+            f"({result.reasoning})"
+        ],
+    }
 
 
 def report_node(state: AgentState):
     """Generate the enterprise report from analyzed_data."""
-    # TODO
-    pass
+    insights = "\n\n".join(
+        f"### {a['title']}\nSource: {a['url']}\n{a['insights']}"
+        for a in state["analyzed_data"]
+    )
+    response = llm.invoke(
+        [
+            HumanMessage(
+                content=(
+                    f"Write a concise enterprise research report on "
+                    f"'{state['topic']}' with an executive summary, key "
+                    f"findings, and recommendations, based on:\n\n{insights}"
+                )
+            )
+        ]
+    )
+    return {
+        "final_report": response.content,
+        "execution_logs": [f"[{datetime.now():%H:%M:%S}] report: generated"],
+    }
 
 
 def audit_node(state: AgentState):
-    """Log completion stats."""
-    # TODO
-    pass
+    """Log completion stats — the compliance trail."""
+    return {
+        "execution_logs": [
+            f"[{datetime.now():%H:%M:%S}] audit: done | "
+            f"iterations={state['iteration_count']} | "
+            f"final_score={state['quality_score']} | "
+            f"sources={len(state['collected_data'])}"
+        ]
+    }
+
+
 
 
 # ============================================================
@@ -229,9 +519,14 @@ def audit_node(state: AgentState):
 # and read the GraphRecursionError message. Now you understand why
 # the docs insist on termination conditions.
 
+
+
 def quality_router(state: AgentState) -> str:
-    # TODO: return "report" or "collect"
-    pass
+    if state["quality_score"] >= 7:
+        return "report"
+    if state["iteration_count"] >= 3:
+        return "report"  # give up gracefully, ship what we have
+    return "collect"
 
 
 # ============================================================
@@ -249,6 +544,33 @@ def quality_router(state: AgentState) -> str:
 # WHERE TO LOOK: Graph API docs → "Edges".
 
 # TODO: your code here
+
+
+
+workflow = StateGraph(AgentState)
+
+workflow.add_node("collect", collect_node)
+workflow.add_node("store_memory", store_memory_node)
+workflow.add_node("analyze", analyze_node)
+workflow.add_node("evaluate", evaluate_node)
+workflow.add_node("report", report_node)
+workflow.add_node("audit", audit_node)
+
+workflow.add_edge(START, "collect")
+workflow.add_edge("collect", "store_memory")
+workflow.add_edge("store_memory", "analyze")
+workflow.add_edge("analyze", "evaluate")
+
+# The dict maps router RETURN VALUES to NODE NAMES.
+workflow.add_conditional_edges(
+    "evaluate",
+    quality_router,
+    {"collect": "collect", "report": "report"},
+)
+
+workflow.add_edge("report", "audit")
+workflow.add_edge("audit", END)
+
 
 
 # ============================================================
@@ -276,7 +598,18 @@ def quality_router(state: AgentState) -> str:
 #    then inspect state and resume. WHERE TO LOOK:
 #       https://docs.langchain.com/oss/python/langgraph/interrupts
 
+ 
+# The runtime entrypoint is the __main__ block below.
+
+
 if __name__ == "__main__":
+    app = workflow.compile(checkpointer=InMemorySaver())
+
+    print("=" * 60)
+    print("GRAPH (paste into https://mermaid.live):")
+    print("=" * 60)
+    print(app.get_graph().draw_mermaid())
+
     initial_state = {
         "topic": "Enterprise Agentic AI Systems",
         "search_query": "",
@@ -287,7 +620,30 @@ if __name__ == "__main__":
         "final_report": "",
         "execution_logs": [],
     }
-    # TODO: compile, visualize, stream, print final report + logs
+
+    config = {"configurable": {"thread_id": "run-1"}}  # required by checkpointer
+
+    print("\n" + "=" * 60)
+    print(f"RUN (USE_FAKE={USE_FAKE})")
+    print("=" * 60)
+
+    final_state = None
+    for chunk in app.stream(initial_state, config, stream_mode="values"):
+        final_state = chunk
+        if chunk["execution_logs"]:
+            print(chunk["execution_logs"][-1])
+
+    print("\n" + "=" * 60)
+    print("FINAL REPORT")
+    print("=" * 60)
+    print(final_state["final_report"])
+
+    print("\n" + "=" * 60)
+    print("FULL EXECUTION LOG")
+    print("=" * 60)
+    for line in final_state["execution_logs"]:
+        print(line)
+
 
 
 # ============================================================
