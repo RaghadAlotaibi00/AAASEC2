@@ -1,27 +1,64 @@
-"""
-DAY 3 — HTTP API.
+import os
+import time
 
-READ FIRST:  ../03-fastapi-openresponses.md
-             ../09-a2a.md   (for the agent card endpoint)
+from fastapi import FastAPI
+from pydantic import BaseModel
 
-Do not continue to 04-docker.md until:
-    curl http://localhost:8000/healthz            -> {"status":"ok"}
-    curl -X POST http://localhost:8000/v1/responses \
-         -H 'Content-Type: application/json' -d '{"input":"hi"}'
-returns an OpenResponses-shaped JSON object.
+from .agent import build_agent
 
-TODO:
-  1. app = FastAPI(...); agent = build_agent()   <- built ONCE, at startup
-  2. GET  /healthz
-  3. POST /v1/responses  — accept {"input": "...", "model": optional},
-     invoke the agent, return:
-       {id, object:"response", created_at, status:"completed", model,
-        output:[{type:"message", role:"assistant",
-                 content:[{type:"output_text", text: ...}]}]}
-     (a deliberate SUBSET of OpenResponses — the shape, not the whole spec)
-  4. GET /.well-known/agent-card.json — your A2A Agent Card. Use
-     STUDENT_NAME and PUBLIC_URL from the environment; the card's "url"
-     field must point at YOUR /v1/responses.
-"""
 
-# TODO
+app = FastAPI(title="Day 3 Agent API")
+agent = build_agent()
+
+
+class ResponseRequest(BaseModel):
+    input: str
+    model: str | None = None
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+@app.post("/v1/responses")
+async def responses(request: ResponseRequest):
+    response = await agent.ainvoke(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": request.input,
+                }
+            ]
+        }
+    )
+
+    last_message = response["messages"][-1]
+    text = last_message["content"]
+    
+
+    return {
+        "id": f"resp_{int(time.time())}",
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": request.model or "day3-agent",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@app.get("/.well-known/agent-card.json")
+async def agent_card():
+    return {"todo": True}
