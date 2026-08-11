@@ -18,3 +18,32 @@ TODO:
 """
 
 # TODO
+from fastmcp import FastMCP
+
+
+mcp = FastMCP("Raghad Tools")
+
+
+@mcp.tool
+def calculate(expression: str) -> float:
+    """Evaluate a basic arithmetic expression, e.g. '2 * (3+4) ** 2'."""
+    return float(eval(expression))
+
+
+@mcp.tool
+def word_stats(text: str) -> dict:
+    """Return basic statistics about a text."""
+    words = text.split()
+    return {
+        "words": len(words),
+        "characters": len(text),
+    }
+
+
+if __name__ == "__main__":
+    mcp.run(
+        transport="http",
+        host="0.0.0.0",
+        port=8001,
+    )
+    
