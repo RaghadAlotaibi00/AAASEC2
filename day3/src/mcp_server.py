@@ -19,9 +19,16 @@ TODO:
 
 # TODO
 from fastmcp import FastMCP
+from pathlib import Path
+from fastmcp.server.providers.skills import SkillsDirectoryProvider
 
 
 mcp = FastMCP("Raghad Tools")
+mcp.add_provider(
+    SkillsDirectoryProvider(
+        roots=Path(__file__).parent.parent / "skills"
+    )
+)
 
 
 @mcp.tool
@@ -46,4 +53,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8001,
     )
-    
