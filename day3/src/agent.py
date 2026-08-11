@@ -6,21 +6,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-try:
-    from deepagents import create_deep_agent
-    from deepagents.backends import FilesystemBackend
-except Exception:  # pragma: no cover - provide local fallbacks for editor/runtime without package
-    from typing import Callable
-
-    def create_deep_agent(*args, **kwargs):
-        raise ImportError(
-            "deepagents package is required to build the real agent. "
-            "Install it or set USE_FAKE=1 to use the FakeAgent."
-        )
-
-    class FilesystemBackend:  # simple placeholder for type compatibility
-        def __init__(self, *args, **kwargs):
-            pass
+from deepagents import create_deep_agent
+from deepagents.backends import FilesystemBackend
 
 load_dotenv()
 
