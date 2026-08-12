@@ -35,7 +35,8 @@ async def responses(request: ResponseRequest):
     )
 
     last_message = response["messages"][-1]
-    text = last_message["content"]
+    text = last_message.content
+    
     
 
     return {
