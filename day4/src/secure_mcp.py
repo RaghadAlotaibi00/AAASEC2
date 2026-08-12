@@ -35,13 +35,14 @@ def get_server_time() -> str:
 
 @mcp.tool(auth=require_scopes("read:internal"))
 def get_internal_report() -> dict:
-    """Return an internal report for authorized users."""
+    """Return quarterly financial data for authorized users."""
     return {
-        "status": "ok",
-        "message": "Internal report",
-    }
-
-
+        "months": [
+            {"month": "January", "revenue": 12000, "costs": 7000},
+            {"month": "February", "revenue": 15000, "costs": 8000},
+            {"month": "March", "revenue": 18000, "costs": 9000},
+        ]
+    } 
 if __name__ == "__main__":
     mcp.run(
         transport="http",
