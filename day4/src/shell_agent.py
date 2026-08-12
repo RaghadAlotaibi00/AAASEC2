@@ -11,6 +11,24 @@ load_dotenv()
 
 WORK_DIR = Path(__file__).resolve().parents[1] / "work"
 
+llm = ChatOpenAI(
+    model="nvidia/nemotron-3-super-120b-a12b:free",
+    temperature=0,
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
+SYSTEM_PROMPT = """
+You are a Deep Agent for Day 4.
+
+You have access to a shell through the execute tool.
+
+Complete the user's task carefully. Use the shell to create files,
+run tests, inspect failures, and fix problems until the tests pass.
+
+Do not invent test results. Report the actual final pytest output.
+"""
+
 
 def make_backend():
     backend = LocalShellBackend(
@@ -24,27 +42,9 @@ def make_backend():
 async def main() -> None:
     backend, cleanup = make_backend()
 
-    llm = ChatOpenAI(
-        model="nvidia/nemotron-3-super-120b-a12b:free",
-        temperature=0,
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-    )
-
-    system_prompt = """
-You are a Deep Agent for Day 4.
-
-You have access to a shell through the execute tool.
-
-Complete the user's task carefully. Use the shell to create files,
-run tests, inspect failures, and fix problems until the tests pass.
-
-Do not invent test results. Report the actual final pytest output.
-"""
-
     agent = create_deep_agent(
         model=llm,
-        system_prompt=system_prompt,
+        system_prompt=SYSTEM_PROMPT,
         backend=backend,
     )
 
@@ -82,4 +82,3 @@ Do not invent test results. Report the actual final pytest output.
 
 if __name__ == "__main__":
     asyncio.run(main())
-    

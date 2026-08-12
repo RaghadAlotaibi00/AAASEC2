@@ -43,9 +43,44 @@ def get_internal_report() -> dict:
             {"month": "March", "revenue": 18000, "costs": 9000},
         ]
     } 
+
+
+
+
+@mcp.tool(auth=require_scopes("read:internal"))
+def get_lab_inventory() -> dict:
+    """Return the protected lab inventory."""
+    return {
+        "laptops": 12,
+        "sensors": 8,
+        "routers": 4,
+        "servers": 3,
+    }
+@mcp.tool(auth=require_scopes("read:internal"))
+def get_course_grades() -> dict:
+    """Return protected course grades."""
+    return {
+        "students": [
+            {"name": "A", "grade": 88},
+            {"name": "B", "grade": 92},
+            {"name": "C", "grade": 76},
+            {"name": "D", "grade": 84},
+        ]
+    }
 if __name__ == "__main__":
     mcp.run(
         transport="http",
         host="0.0.0.0",
         port=8002,
     )
+@mcp.tool(auth=require_scopes("read:internal"))
+def get_lab_inventory() -> dict:
+    """Return the protected lab inventory."""
+    return {
+        "status": "ok",
+        "items": {
+            "laptops": 12,
+            "sensors": 8,
+            "routers": 4,
+        },
+    }
